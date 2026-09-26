@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "my-first-app",
+    "name": "Travel Expenses",
     "slug": "my-first-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -31,6 +31,14 @@
           "backgroundColor": "#208AEF",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Travel Expenses to access your photos for receipt uploads.",
+          "cameraPermission": "Allow Travel Expenses to use the camera to scan receipts.",
+          "microphonePermission": false
         }
       ]
     ],
