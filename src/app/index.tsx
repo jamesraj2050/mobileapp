@@ -17,7 +17,7 @@ import type { Trip } from '@/types/expense';
 import { formatDateRange, formatMoney } from '@/utils/format';
 
 export default function MyTripsScreen() {
-  const { trips, ready } = useTrips();
+  const { trips, ready, error } = useTrips();
   const router = useRouter();
   const colors = useTheme();
 
@@ -40,6 +40,14 @@ export default function MyTripsScreen() {
       {!ready ? (
         <View style={styles.centered}>
           <ActivityIndicator />
+        </View>
+      ) : error ? (
+        <View style={styles.centered}>
+          <Text style={[styles.emptyTitle, { color: colors.text }]}>Turso connection failed</Text>
+          <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>{error}</Text>
+          <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
+            Check .env values, then restart with npx expo start --clear
+          </Text>
         </View>
       ) : trips.length === 0 ? (
         <View style={styles.centered}>

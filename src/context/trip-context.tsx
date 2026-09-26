@@ -8,13 +8,19 @@ import {
   type ReactNode,
 } from 'react';
 
-import { loadTrips, saveTrips } from '@/storage/trips';
+import {
+  insertExpense,
+  insertTrip,
+  loadTrips,
+  updateTripStatus,
+} from '@/storage/trips';
 import type { Expense, Trip } from '@/types/expense';
 import { createId } from '@/utils/format';
 
 type TripContextValue = {
   trips: Trip[];
   ready: boolean;
+  error: string | null;
   getTrip: (id: string) => Trip | undefined;
   createTrip: (input: {
     from: string;
@@ -25,6 +31,7 @@ type TripContextValue = {
   }) => Promise<Trip>;
   addExpense: (tripId: string, expense: Omit<Expense, 'id' | 'createdAt'>) => Promise<Expense | null>;
   finishTrip: (tripId: string) => Promise<void>;
+  refresh: () => Promise<void>;
 };
 
 const TripContext = createContext<TripContextValue | null>(null);
@@ -32,28 +39,35 @@ const TripContext = createContext<TripContextValue | null>(null);
 export function TripProvider({ children }: { children: ReactNode }) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [ready, setReady] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const loaded = await loadTrips();
-      if (!cancelled) {
-        setTrips(loaded);
-        setReady(true);
+      try {
+        const loaded = await Promise.race([
+          loadTrips(),
+          new Promise<Trip[]>((_, reject) =>
+            setTimeout(() => reject(new Error('Turso request timed out')), 12000)
+          ),
+        ]);
+        if (!cancelled) {
+          setTrips(loaded);
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'Failed to load trips from Turso');
+        }
+      } finally {
+        if (!cancelled) {
+          setReady(true);
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  const persistUpdate = useCallback(async (updater: (prev: Trip[]) => Trip[]) => {
-    let next: Trip[] = [];
-    setTrips((prev) => {
-      next = updater(prev);
-      return next;
-    });
-    await saveTrips(next);
   }, []);
 
   const getTrip = useCallback((id: string) => trips.find((t) => t.id === id), [trips]);
@@ -77,10 +91,11 @@ export function TripProvider({ children }: { children: ReactNode }) {
         expenses: [],
         createdAt: new Date().toISOString(),
       };
-      await persistUpdate((prev) => [trip, ...prev]);
+      await insertTrip(trip);
+      setTrips((prev) => [trip, ...prev]);
       return trip;
     },
-    [persistUpdate]
+    []
   );
 
   const addExpense = useCallback(
@@ -90,37 +105,51 @@ export function TripProvider({ children }: { children: ReactNode }) {
         id: createId('exp'),
         createdAt: new Date().toISOString(),
       };
-      await persistUpdate((prev) =>
+      await insertExpense(tripId, expense);
+      setTrips((prev) =>
         prev.map((trip) =>
           trip.id === tripId ? { ...trip, expenses: [expense, ...trip.expenses] } : trip
         )
       );
       return expense;
     },
-    [persistUpdate]
+    []
   );
 
-  const finishTrip = useCallback(
-    async (tripId: string) => {
-      await persistUpdate((prev) =>
-        prev.map((trip) =>
-          trip.id === tripId ? { ...trip, status: 'finished' as const } : trip
-        )
-      );
-    },
-    [persistUpdate]
-  );
+  const finishTrip = useCallback(async (tripId: string) => {
+    await updateTripStatus(tripId, 'finished');
+    setTrips((prev) =>
+      prev.map((trip) =>
+        trip.id === tripId ? { ...trip, status: 'finished' as const } : trip
+      )
+    );
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setReady(false);
+    try {
+      const loaded = await loadTrips();
+      setTrips(loaded);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load trips from Turso');
+    } finally {
+      setReady(true);
+    }
+  }, []);
 
   const value = useMemo(
     () => ({
       trips,
       ready,
+      error,
       getTrip,
       createTrip,
       addExpense,
       finishTrip,
+      refresh,
     }),
-    [trips, ready, getTrip, createTrip, addExpense, finishTrip]
+    [trips, ready, error, getTrip, createTrip, addExpense, finishTrip, refresh]
   );
 
   return <TripContext.Provider value={value}>{children}</TripContext.Provider>;
