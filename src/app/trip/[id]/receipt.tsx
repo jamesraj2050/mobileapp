@@ -1,32 +1,70 @@
 import { Image } from 'expo-image';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { FieldInput, FieldLabel, PrimaryButton, Screen } from '@/components/ui-kit';
 import { Spacing } from '@/constants/theme';
+import { useTrips } from '@/context/trip-context';
 import { useTheme } from '@/hooks/use-theme';
+import { isPdfMimeOrUri, uploadReceiptToR2 } from '@/services/receipt-upload';
 import { suggestReceiptAmount } from '@/utils/format';
 
+function paramString(value: string | string[] | undefined): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  return '';
+}
+
 export default function ReceiptConfirmScreen() {
-  const { id, uri } = useLocalSearchParams<{ id: string; uri: string }>();
+  const params = useLocalSearchParams<{
+    id: string;
+    uri: string;
+    mimeType?: string;
+    name?: string;
+  }>();
+  const id = paramString(params.id);
+  const uri = paramString(params.uri);
+  const mimeType = paramString(params.mimeType);
+  const fileName = paramString(params.name) || 'receipt';
   const router = useRouter();
   const colors = useTheme();
+  const { setPendingReceipt } = useTrips();
 
+  const isPdf = isPdfMimeOrUri(mimeType, uri);
   const suggested = useMemo(() => suggestReceiptAmount(), []);
   const [amount, setAmount] = useState(suggested.toFixed(2));
+  const [uploading, setUploading] = useState(false);
 
-  const onConfirm = () => {
+  const onConfirm = async () => {
+    if (!uri) {
+      Alert.alert('Missing receipt', 'No receipt file to upload.');
+      return;
+    }
+
     const parsed = Number(amount.replace(/[^0-9.]/g, ''));
     const confirmed = Number.isFinite(parsed) && parsed > 0 ? parsed.toFixed(2) : '';
-    router.replace({
-      pathname: '/trip/[id]/add',
-      params: {
-        id,
+
+    setUploading(true);
+    try {
+      const remoteUrl = await uploadReceiptToR2(
+        uri,
+        mimeType || (isPdf ? 'application/pdf' : 'image/jpeg')
+      );
+      setPendingReceipt({
+        tripId: id,
+        receiptUri: remoteUrl,
         amount: confirmed,
-        receiptUri: uri,
-      },
-    });
+      });
+      router.back();
+    } catch (e) {
+      Alert.alert(
+        'Upload failed',
+        e instanceof Error ? e.message : 'Could not upload receipt to Cloudflare R2.'
+      );
+    } finally {
+      setUploading(false);
+    }
   };
 
   return (
@@ -41,7 +79,8 @@ export default function ReceiptConfirmScreen() {
           style={styles.amountInput}
         />
         <Text style={[styles.hint, { color: colors.textSecondary }]}>
-          Amount can be edited. OCR suggests — you confirm.
+          Amount can be edited. OCR suggests — you confirm. Confirm also uploads the receipt to
+          Cloudflare R2.
         </Text>
 
         {uri ? (
@@ -49,11 +88,24 @@ export default function ReceiptConfirmScreen() {
             <Text style={[styles.previewLabel, { color: colors.textSecondary }]}>
               Receipt Preview
             </Text>
-            <Image source={{ uri }} style={styles.preview} contentFit="contain" />
+            {isPdf ? (
+              <View style={styles.pdfBox}>
+                <Text style={[styles.pdfIcon, { color: colors.text }]}>PDF</Text>
+                <Text style={[styles.pdfName, { color: colors.text }]} numberOfLines={2}>
+                  {fileName}
+                </Text>
+              </View>
+            ) : (
+              <Image source={{ uri }} style={styles.preview} contentFit="contain" />
+            )}
           </View>
         ) : null}
 
-        <PrimaryButton label="CONFIRM" onPress={onConfirm} />
+        <PrimaryButton
+          label={uploading ? 'UPLOADING…' : 'CONFIRM'}
+          onPress={onConfirm}
+          disabled={uploading}
+        />
       </ScrollView>
     </Screen>
   );
@@ -91,5 +143,22 @@ const styles = StyleSheet.create({
     width: '100%',
     height: 280,
     borderRadius: 8,
+  },
+  pdfBox: {
+    minHeight: 160,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.four,
+  },
+  pdfIcon: {
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  pdfName: {
+    fontSize: 15,
+    textAlign: 'center',
+    paddingHorizontal: Spacing.three,
   },
 });

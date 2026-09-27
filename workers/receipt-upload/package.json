@@ -1,0 +1,17 @@
+{
+  "name": "receipt-upload",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "secret": "wrangler secret put UPLOAD_SECRET"
+  },
+  "devDependencies": {
+    "wrangler": "^4.40.0",
+    "@cloudflare/workers-types": "^4.20250926.0",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "expo-document-picker": "~57.0.2"
+  }
+}

@@ -17,10 +17,18 @@ import {
 import type { Expense, Trip } from '@/types/expense';
 import { createId } from '@/utils/format';
 
+type PendingReceipt = {
+  tripId: string;
+  receiptUri: string;
+  amount: string;
+};
+
 type TripContextValue = {
   trips: Trip[];
   ready: boolean;
   error: string | null;
+  pendingReceipt: PendingReceipt | null;
+  setPendingReceipt: (pending: PendingReceipt | null) => void;
   getTrip: (id: string) => Trip | undefined;
   createTrip: (input: {
     from: string;
@@ -40,6 +48,7 @@ export function TripProvider({ children }: { children: ReactNode }) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingReceipt, setPendingReceipt] = useState<PendingReceipt | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,13 +152,25 @@ export function TripProvider({ children }: { children: ReactNode }) {
       trips,
       ready,
       error,
+      pendingReceipt,
+      setPendingReceipt,
       getTrip,
       createTrip,
       addExpense,
       finishTrip,
       refresh,
     }),
-    [trips, ready, error, getTrip, createTrip, addExpense, finishTrip, refresh]
+    [
+      trips,
+      ready,
+      error,
+      pendingReceipt,
+      getTrip,
+      createTrip,
+      addExpense,
+      finishTrip,
+      refresh,
+    ]
   );
 
   return <TripContext.Provider value={value}>{children}</TripContext.Provider>;
