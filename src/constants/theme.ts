@@ -7,6 +7,12 @@ import '@/global.css';
 
 import { Platform } from 'react-native';
 
+/** Ark Consulting Group brand (from logo). */
+export const Brand = {
+  primary: '#00234E',
+  primaryMuted: '#003366',
+} as const;
+
 export const Colors = {
   light: {
     text: '#000000',

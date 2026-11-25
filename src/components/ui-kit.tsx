@@ -8,7 +8,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 
-import { Spacing } from '@/constants/theme';
+import { Brand, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 export function Screen({ children, style }: { children: React.ReactNode; style?: ViewStyle }) {
@@ -20,7 +20,7 @@ export function Screen({ children, style }: { children: React.ReactNode; style?:
 
 export function FieldLabel({ children }: { children: string }) {
   const colors = useTheme();
-  return <Text style={[styles.label, { color: colors.textSecondary }]}>{children}</Text>;
+  return <Text style={[styles.label, { color: colors.text }]}>{children}</Text>;
 }
 
 export function FieldInput(props: TextInputProps) {
@@ -113,7 +113,7 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.three,
   },
   primaryBtn: {
-    backgroundColor: '#1A73E8',
+    backgroundColor: Brand.primary,
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: 'center',

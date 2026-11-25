@@ -1,507 +1,508 @@
-# README1 — Technical Assessment & Google Auth Plan
+# README1 — Travel Expenses: Architecture, Changes & Commands
 
-Assessment date: 27 Sep 2026  
-Purpose: Hand-off document for a later agent to implement Google authentication without breaking existing Turso or Cloudflare R2 integrations.
+Updated: 30 Sep 2026  
+Purpose: Hand-off document for the **implemented** local-first + Google Auth + Cloudflare Worker API architecture, including Gemini receipt extraction.
 
-**Status at assessment time:** App is already developed. Do not treat this as a greenfield project.
-
----
-
-## 0. Already implemented (do not replace)
-
-| Layer | Status |
-|---|---|
-| React Native | Implemented |
-| Expo | Implemented (SDK ~57) |
-| Expo Router | Implemented |
-| TypeScript | Implemented |
-| Turso database | Implemented |
-| Cloudflare R2 (via Worker) | Implemented |
-
-**Rules for follow-up work**
-
-- Prefer additive changes (migrations, new screens, wrappers).
-- Do not rip out Turso or R2.
-- Do not put R2 Access Key / Secret Access Key into Expo `.env`.
-- Auth should happen **before** Create Trip / Save Expense / Upload Receipt (required for paid multi-user).
+**Product priority:** ~15-second receipt/expense capture · offline-tolerant · cloud sync in background · AI prefill when possible.
 
 ---
 
-## 1. Current project structure
+## 0. Architecture (current)
+
+```
+MOBILE APP (Expo)
+  ├─ Google sign-in (expo-auth-session ID token)
+  ├─ Secure session (expo-secure-store)
+  ├─ Local-first trips/expenses (AsyncStorage, per userId)
+  ├─ Place memory (per-user From/To suggestions)
+  ├─ Instant UI save
+  └─ Background sync engine
+           │
+           ▼  Authorization: Bearer <Google ID token>
+CLOUDFLARE WORKER  (receipt-upload.jamesraj2050.workers.dev)
+  ├─ Verify JWT (jose + Google JWKS)
+  ├─ users upsert by google_sub → users.id
+  ├─ User-scoped Turso SQL
+  ├─ Authenticated R2 put/get
+  └─ POST /receipts/extract → Gemini (type, from, to, date, amount)
+           │
+     ┌─────┼─────────┐
+     ▼     ▼         ▼
+   TURSO  R2      Gemini API
+ metadata receipts  (server-side key only)
+```
+
+**Hard rules**
+
+- Mobile must **not** contain Turso URL/token, R2 secrets, or `GEMINI_API_KEY`.
+- Cloud sync / AI extract must **not** block SAVE.
+- Every API/DB/R2 operation is scoped to the authenticated `users.id`.
+- Legacy Turso rows without `user_id` are preserved, not auto-assigned.
+
+---
+
+## 1. Project structure (after changes)
 
 ```
 my-first-app/
 ├── app.json
 ├── package.json
-├── tsconfig.json
-├── .env                          # local secrets (gitignored)
+├── eas.json
+├── .env                          # gitignored
 ├── .env.example
-├── AGENTS.md
-├── README.md
 ├── README1.md                    # this file
-├── assets/
-├── scripts/
-│   └── reset-project.js
 ├── src/
-│   ├── app/                      # Expo Router screens
-│   │   ├── _layout.tsx
-│   │   ├── index.tsx             # My Trips
-│   │   ├── create-trip.tsx
+│   ├── app/
+│   │   ├── _layout.tsx           # AuthProvider → TripProvider → TaxWorkProvider → Stack
+│   │   ├── index.tsx             # Login + My Trips (+ next to title)
+│   │   ├── create-trip.tsx       # Auto trip name + place memory / suggestions
+│   │   ├── tax-work/              # Year list, capture, year detail, receipt edit
 │   │   └── trip/[id]/
-│   │       ├── index.tsx         # Trip expenses
-│   │       ├── add.tsx           # Add expense
-│   │       ├── receipt.tsx       # Confirm + upload
-│   │       └── review.tsx        # Review / finish
-│   ├── components/
-│   ├── constants/
+│   │       ├── index.tsx         # ADD EXPENSE, list, receipt view (no Close Trip)
+│   │       ├── add.tsx           # Receipt first → AI fill → type details → save
+│   │       ├── receipt.tsx       # Legacy quick confirm + AI amount
+│   │       └── review.tsx        # Finish Trip (marks finished)
+│   ├── auth/
+│   │   └── session.ts
 │   ├── context/
-│   │   └── trip-context.tsx
+│   │   ├── auth-context.tsx
+│   │   ├── trip-context.tsx
+│   │   └── tax-work-context.tsx
 │   ├── db/
-│   │   └── turso.ts              # Turso HTTP pipeline + schema
-│   ├── hooks/
+│   │   └── turso.ts              # Stub — no direct Turso from app
 │   ├── services/
-│   │   └── receipt-upload.ts     # Client → Worker upload
+│   │   ├── api.ts                # Worker client + extractReceiptFields
+│   │   ├── sync.ts
+│   │   ├── tax-work-sync.ts
+│   │   └── receipt-upload.ts     # Deprecated stub
 │   ├── storage/
-│   │   └── trips.ts              # Trip/expense CRUD
-│   ├── types/
-│   │   └── expense.ts
-│   └── utils/
-└── workers/
-    └── receipt-upload/           # Cloudflare Worker → R2
-        ├── wrangler.toml
-        ├── package.json
-        ├── README.md
-        └── src/index.ts
+│   │   ├── local-store.ts
+│   │   ├── tax-work-store.ts
+│   │   ├── places.ts             # Per-user remembered From/To places
+│   │   └── trips.ts
+│   ├── types/expense.ts
+│   ├── constants/expense-types.ts
+│   └── utils/format.ts           # generateTripName, formatPlaceName, …
+└── workers/receipt-upload/
+    ├── wrangler.toml
+    ├── .dev.vars.example
+    ├── README.md
+    └── src/
+        ├── index.ts              # API router (+ /receipts/extract)
+        ├── auth.ts
+        ├── gemini.ts             # Vision extract + PDF Files API
+        ├── schema.ts
+        └── turso.ts
 ```
 
 ---
 
-## 2. Versions
+## 2. Files created
 
-| Package | Version |
+| File | Role |
 |---|---|
-| Expo SDK | `~57.0.25` |
-| React Native | `0.86.3` |
-| React | `19.2.3` |
-| Expo Router | `~57.0.23` |
-| TypeScript | `~6.0.3` |
-| `@libsql/client` | `^0.18.0` (dependency present; runtime queries use custom HTTP in `turso.ts`) |
-| `expo-image-picker` | `~57.0.20` |
-| `expo-document-picker` | `~57.0.2` |
+| `src/auth/session.ts` | Persist Google ID token + user in SecureStore |
+| `src/context/auth-context.tsx` | Google OAuth + session |
+| `src/services/api.ts` | Authenticated Worker client; receipt extract/upload/view |
+| `src/services/sync.ts` | Metadata sync → R2 upload → receipt_key sync |
+| `src/storage/local-store.ts` | `local_trips_v2:{userId}` store |
+| `src/storage/places.ts` | Place memory + best-guess From/To |
+| `workers/receipt-upload/src/auth.ts` | JWT verify + `getOrCreateUser` |
+| `workers/receipt-upload/src/schema.ts` | Turso migrations |
+| `workers/receipt-upload/src/turso.ts` | Server Turso HTTP client |
+| `workers/receipt-upload/src/gemini.ts` | Gemini extract (type/from/to/date/amount) |
+| `workers/receipt-upload/.dev.vars.example` | Local Worker secrets template |
+| `eas.json` | EAS project config |
 
-Useful commands:
+---
+
+## 3. Notable app UX (current)
+
+| Area | Behaviour |
+|---|---|
+| **Create Trip** | Placeholders `eg:Brisbane` / `eg:Perth`; auto-fills best-guess places; suggestion chips; trip name auto from From+To+Start until manually edited; place names Title Case |
+| **Trip screen** | **+ ADD EXPENSE** only. Finish via **Review → Finish Trip** (Close Trip removed from this screen) |
+| **Add Expense** | Receipt **first** (Scan / Photo \| PDF). AI selects **Type** and fills fields; then editable form |
+| **AI fill — travel** (flight/car/taxi/bus/train) | Type, From, To, Date, Amount |
+| **AI fill — meal / accommodation / parking** | Type, Date, Amount (+ hotel/merchant when found) |
+| **Travel time** | Removed (not captured) |
+
+---
+
+## 4. Packages
+
+**App (`npx expo install …`)**
+
+| Package | Purpose |
+|---|---|
+| `expo-auth-session` | Google OAuth |
+| `expo-crypto` | Device UUIDs |
+| `expo-secure-store` | Session storage |
+| `expo-file-system` | Local receipt persistence |
+| (already present) `expo-web-browser`, `expo-document-picker`, `expo-image-picker`, AsyncStorage | — |
+
+**Removed from app:** `@libsql/client` (no direct Turso from mobile).
+
+**Worker:** `jose` (Google ID token verify). Gemini called via REST (no SDK).
+
+---
+
+## 5. Database schema (Turso via Worker)
+
+```sql
+users (
+  id TEXT PRIMARY KEY,
+  google_sub TEXT UNIQUE NOT NULL,
+  email TEXT,
+  name TEXT,
+  created_at TEXT,
+  updated_at TEXT
+)
+
+trips.user_id, trips.updated_at
+expenses.user_id, expenses.updated_at
+expenses.receipt_key
+expenses.receipt_detected_amount
+expenses.local_receipt_uri
+expenses.details_json          -- type-specific fields JSON
+
+INDEX idx_trips_user_created ON trips(user_id, created_at)
+INDEX idx_expenses_user_trip ON expenses(user_id, trip_id)
+```
+
+Legacy rows without `user_id` are left unassigned (not auto-claimed).
+
+---
+
+## 6. API endpoints (Worker)
+
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/health` | no |
+| GET | `/me` | Bearer Google ID token |
+| GET / POST | `/trips` | yes |
+| GET / PATCH / DELETE | `/trips/:tripId` | yes |
+| POST | `/trips/:tripId/expenses` | yes |
+| PATCH / DELETE | `/trips/:tripId/expenses/:expenseId` | yes |
+| POST | `/sync` | yes (batch upsert) |
+| POST | `/receipts/extract` | yes (raw image/PDF body → Gemini JSON) |
+| POST | `/receipts/upload` | yes + `X-Trip-Id`, `X-Expense-Id` |
+| GET | `/receipts/:key` | yes (owner only) |
+
+Deployed URL: `https://receipt-upload.jamesraj2050.workers.dev`
+
+### Receipt AI (`POST /receipts/extract`)
+
+1. Authenticate user (same Google JWT).
+2. Sniff MIME from magic bytes (`%PDF`, JPEG, PNG, …) — avoids treating PDFs as JPEG when the client sends `octet-stream`.
+3. PDFs: upload via Gemini **Files API**, then `generateContent`.
+4. Images: inline base64 (with model fallbacks if a model is retired).
+5. Returns `{ extraction: { type, amount, date, from, to, merchant } }`.
+6. Failure never blocks save — app shows a short hint; fields stay editable.
+
+Default model: `gemini-2.5-flash` (fallbacks: `gemini-3.1-flash-lite`, `gemini-3.5-flash`, `gemini-flash-latest`).
+
+---
+
+## 7. Local storage & sync
+
+### Local keys
+
+- Trips: `local_trips_v2:{userId}`
+- Places: `place_memory_v1:{userId}`
+- Legacy `local_trips_v1` cleared on load
+- Receipts: `documentDirectory/receipts/{userId}/{expenseId}.{ext}`
+
+### Sync order
+
+1. Upsert trip/expense metadata (`POST /sync`)  
+2. Upload pending receipt binaries to R2  
+3. Upsert again so `receipt_key` is stored  
+
+Statuses: `pending` → `syncing` → `synced` | `failed` (glyphs ✓ / ↻ / ⚠).  
+Client UUIDs make sync idempotent.
+
+### Retention policy
+
+- Business Travel and Tax / Work records have a three-year minimum retention policy.
+- Records remain available beyond three years until the user explicitly deletes them.
+- There is no scheduled age-based deletion job.
+- Deleting a Business Travel trip permanently removes its expenses and R2 receipts.
+- Tax years can be hidden, restored, or permanently deleted with confirmation.
+
+---
+
+## 8. Authentication
+
+### Mobile
+
+1. **Continue with Google** → ID token  
+2. `GET /me` creates/loads `users` row  
+3. Session in SecureStore (`auth_session_v1`)
+
+### Worker
+
+- Verifies JWKS, issuer, audience (`GOOGLE_CLIENT_IDS`), expiry  
+- Maps `google_sub` → `users.id`
+
+### App IDs
+
+| Platform | Identifier |
+|---|---|
+| iOS / Android | `com.arkconsultinggroup.travelexpenses` |
+| URL scheme | `myfirstapp` |
+
+---
+
+## 9. Environment variables
+
+### Mobile `.env` (public only)
+
+```bash
+EXPO_PUBLIC_API_URL=https://receipt-upload.jamesraj2050.workers.dev
+EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=....apps.googleusercontent.com
+EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=....apps.googleusercontent.com
+EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID=....apps.googleusercontent.com
+```
+
+**Never in the app:** Turso URL/token, R2/upload secrets, `GEMINI_API_KEY`.
+
+### Worker secrets
+
+```bash
+cd workers/receipt-upload
+npx wrangler secret put TURSO_DATABASE_URL
+npx wrangler secret put TURSO_AUTH_TOKEN
+npx wrangler secret put GOOGLE_CLIENT_IDS   # comma-separated OAuth client IDs
+npx wrangler secret put GEMINI_API_KEY      # from https://aistudio.google.com/apikey
+```
+
+Optional: `GEMINI_MODEL` (default `gemini-2.5-flash`).  
+Local: copy `.dev.vars.example` → `.dev.vars`.
+
+---
+
+## 10. UX flows
+
+### My Trips
+
+- Google login gate · **+** beside title · Sign out · per-user list + sync glyph
+
+### Trip screen
+
+- **+ ADD EXPENSE**  
+- Row: date · type · summary · amount · receipt icon · sync  
+- Finish trip from **Review** (not a Close button on this screen)
+
+### Add Expense
+
+1. **Scan** or **Photo | PDF / File** (split control)  
+2. AI reads receipt → selects Type + fills Date/Amount (and From/To for travel)  
+3. User edits anything wrong  
+4. **SAVE EXPENSE** — local first, background sync  
+
+### Create Trip
+
+1. From / To (auto-guess + chips) · Start / End dates  
+2. Trip name auto: `Brisbane_to_Melbourne_29Sep2026` until manually edited  
+3. Create → open trip  
+
+---
+
+## 11. Commands cheat-sheet
+
+### App
 
 ```bash
 cd "/Users/apple/Documents/AI Business related/mobileapp/my-first-app"
-npx expo start
+
 npx expo start --clear
-npx expo start --web
+npx expo start --web --port 8081
+
 npx tsc --noEmit
 npx expo lint
-npx expo-doctor
 ```
 
----
-
-## 3. Expo Router structure
-
-Root layout: `src/app/_layout.tsx`
-
-- Wraps app in `TripProvider`
-- Uses a single **Stack** navigator (no tabs)
-
-| File | Screen | Notes |
-|---|---|---|
-| `src/app/index.tsx` | My Trips | Home; create via `+` |
-| `src/app/create-trip.tsx` | Create Trip | Modal presentation |
-| `src/app/trip/[id]/index.tsx` | Trip Expenses | Total, list, add |
-| `src/app/trip/[id]/add.tsx` | Add Expense | Type/date/amount/receipt |
-| `src/app/trip/[id]/receipt.tsx` | Receipt Confirm | Edit amount; upload to R2 |
-| `src/app/trip/[id]/review.tsx` | Review Trip | Finish trip (local status only) |
-
-Deep link scheme: `myfirstapp` (`app.json`).
-
----
-
-## 4. Turso integration
-
-### How it works
-
-1. `src/db/turso.ts` talks to Turso over HTTPS (`/v2/pipeline`).
-2. Converts `libsql://` → `https://`.
-3. Sends `Authorization: Bearer <EXPO_PUBLIC_TURSO_AUTH_TOKEN>`.
-4. `ensureSchema()` creates tables if missing.
-5. `src/storage/trips.ts` performs load/insert/update.
-6. `src/context/trip-context.tsx` owns in-memory state + pending receipt handoff.
-
-### Where connection is configured
-
-| Location | Role |
-|---|---|
-| `.env` | `EXPO_PUBLIC_TURSO_DATABASE_URL`, `EXPO_PUBLIC_TURSO_AUTH_TOKEN` |
-| `src/db/turso.ts` | Reads env, builds pipeline requests |
-| `src/storage/trips.ts` | SQL CRUD |
-| `src/context/trip-context.tsx` | App-facing API |
-
-### Current schema / relationships
-
-```sql
-CREATE TABLE IF NOT EXISTS trips (
-  id TEXT PRIMARY KEY NOT NULL,
-  from_city TEXT NOT NULL,
-  to_city TEXT NOT NULL,
-  start_date TEXT NOT NULL,
-  end_date TEXT NOT NULL,
-  name TEXT NOT NULL,
-  status TEXT NOT NULL,          -- 'active' | 'finished'
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS expenses (
-  id TEXT PRIMARY KEY NOT NULL,
-  trip_id TEXT NOT NULL,         -- logical FK → trips.id
-  type TEXT NOT NULL,
-  date TEXT NOT NULL,
-  amount REAL NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
-  receipt_uri TEXT,
-  receipt_status TEXT NOT NULL,  -- 'attached' | 'missing'
-  created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_expenses_trip_id ON expenses(trip_id);
-```
-
-**Relationship:** `expenses.trip_id` → `trips.id`  
-**Missing for multi-user:** no `user_id` / accounts table.  
-**Current load:** `SELECT * FROM trips` / `SELECT * FROM expenses` (global, not scoped).
-
-### Turso commands (ops / verification)
+### Worker
 
 ```bash
-# From project root — smoke test without printing secrets
-node -e "
-const fs=require('fs');
-const env=Object.fromEntries(fs.readFileSync('.env','utf8').split(/\n/).filter(l=>l&&!l.startsWith('#')).map(l=>{const i=l.indexOf('=');return [l.slice(0,i).trim(),l.slice(i+1).trim()] }));
-const { createClient } = require('@libsql/client');
-(async()=>{
-  const c=createClient({url:env.EXPO_PUBLIC_TURSO_DATABASE_URL, authToken:env.EXPO_PUBLIC_TURSO_AUTH_TOKEN});
-  const t=await c.execute('SELECT count(*) as n FROM trips');
-  const e=await c.execute('SELECT count(*) as n FROM expenses');
-  console.log('trips', t.rows[0].n, 'expenses', e.rows[0].n);
-})();
-"
+cd workers/receipt-upload
+npm install
+npx wrangler secret put TURSO_DATABASE_URL
+npx wrangler secret put TURSO_AUTH_TOKEN
+npx wrangler secret put GOOGLE_CLIENT_IDS
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler deploy
+
+curl -s https://receipt-upload.jamesraj2050.workers.dev/health
+```
+
+### Git
+
+```bash
+git status
+git add …   # never add .env or secrets
+git commit -m "…"
+# push only when asked
 ```
 
 ---
 
-## 5. Cloudflare R2 integration
+## 12. Cloudflare / R2 / Google / Gemini
 
-### How it works
-
-- Expo app does **not** use R2 S3 Access Key / Secret.
-- `workers/receipt-upload` Cloudflare Worker binds R2 bucket `first-mobile-app` as `RECEIPTS`.
-- Client uploads via shared header secret `X-Upload-Secret`.
-
-### Where config is stored
-
-| Secret / config | Where |
+| System | Config |
 |---|---|
-| R2 bucket binding | `workers/receipt-upload/wrangler.toml` → `bucket_name = "first-mobile-app"` |
-| `UPLOAD_SECRET` | Cloudflare Worker secret (`wrangler secret put`) |
-| Worker public URL | Expo `.env` → `EXPO_PUBLIC_RECEIPT_UPLOAD_URL` |
-| Same secret mirrored for client | Expo `.env` → `EXPO_PUBLIC_RECEIPT_UPLOAD_SECRET` |
+| Worker | `receipt-upload` |
+| R2 | binding `RECEIPTS` → `first-mobile-app` |
+| Secrets | `TURSO_*`, `GOOGLE_CLIENT_IDS`, `GEMINI_API_KEY` |
+| Google OAuth | Web/iOS/Android clients; redirect URIs for each Expo web port (`8081`, `8082`, …) |
+| Gemini | Free AI Studio key; server-side only |
 
-**Important:** R2 Access Key ID / Secret Access Key / S3 endpoint are **not** required in Expo `.env` for the current design.
+---
 
-### Worker endpoints
+## 13. Bugs fixed (recent)
+
+| Issue | Cause | Fix |
+|---|---|---|
+| “Failed to fetch” after login | Old Worker / CORS | Redeploy; allow `Authorization` |
+| Same trips for two Google users | Shared AsyncStorage | `local_trips_v2:{userId}` |
+| Receipt upload stuck pending | Upload before expense in Turso | Sync metadata → R2 → keys |
+| “Trip not found” after create | Sync race | Disk reconcile + deferred sync |
+| Trip name not auto-filling | `nameTouched` on focus | Sync from autoName until real edit |
+| Upload button did nothing (web) | `Alert.alert` chooser | Direct Photo \| PDF split control |
+| AI failed (`gemini-2.0-flash`) | Model retired | `gemini-2.5-flash` + fallbacks |
+| Some PDFs not extracted | `octet-stream` treated as JPEG | Magic-byte sniff + Gemini Files API for PDFs |
+| Close Trip cluttered Add flow | Wrong placement | Removed from trip screen; finish via Review |
+
+---
+
+## 14. Subscription plan (agreed — implement after testing)
+
+**Decision:** Entitlement + trial **first**; Apple/Google IAP **last**. Payments only after product testing is done.
+
+### Model
+
+```
+ARK CONSULTING GROUP → Travel Expenses → ONE USER ACCOUNT
+  ├─ iPhone: Apple IAP  $7/year (+ 3 months free)
+  └─ Android: Google Play $7/year (+ 3 months free)
+           ↓
+     YOUR BACKEND (Worker) → ENTITLEMENT
+           ↓
+     iOS / Android / Web  →  Turso + R2
+```
+
+- **Price:** USD/AUD **$7 per year** (confirm currency before store setup).
+- **Trial:** first **3 months free** (start on first successful Google login — server-side).
+- **Billing:** mobile only (Apple IAP + Google Play).
+- **Web:** free for any user with active entitlement (no Stripe/web checkout in v1).
+- **Source of truth:** Worker/`users` entitlement fields — never device-only.
+
+### Phases (do in order)
+
+| Phase | What | When |
+|---|---|---|
+| **A** | Entitlement fields + gate (`trialing` / `active` / `expired` / `grace`) on Worker; soft paywall in app | After testing; before IAP |
+| **B** | Auto-start 3‑month trial on first login (no stores) | With Phase A |
+| **C** | Apple + Google yearly product, verify receipts/webhooks, restore purchases | Last |
+| **D** | Web only checks entitlement (already free if entitled) | With C |
+
+### Notes
+
+- Grace period (e.g. 3–7 days) after failed renewal before lockout.
+- Restore Purchases on iOS/Android.
+- Optional later: Stripe on web for non-mobile users — **not** in v1.
+- Earlier draft prices (AUD $4 / $24) superseded by **$7/year** above.
+
+**Status:** Plan agreed. User completing product testing before Phase A implementation.
+
+---
+
+## 15. Verification checklist
+
+- [x] Google login + session persist  
+- [x] Worker JWT → `users` row  
+- [x] Local-first trips; background sync  
+- [x] No Turso/R2/Gemini secrets in Expo  
+- [x] User isolation (local + API)  
+- [x] Receipt upload after expense sync; view via icon  
+- [x] ADD EXPENSE type-specific form  
+- [x] Finish trip via Review (not Close on trip screen)  
+- [x] Gemini extract: type, date, amount, from/to for travel  
+- [x] Place memory + Title Case place names  
+- [ ] Full production E2E on physical iOS + Android store builds  
+- [ ] Legacy `user_id` NULL ownership migration (manual if needed)  
+
+---
+
+## 16. Status
+
+**Not claimed production-ready** until OAuth, multi-device E2E, and receipt AI are fully verified on store builds.
+
+Delivered now:
+
+1. Fast expense capture with type details  
+2. Local-first data + background sync  
+3. Secure multi-user cloud (Worker → Turso + R2)  
+4. Gemini receipt prefill (Type / From / To / Date / Amount)  
+5. Lean trip UX (add expenses; finish from Review)  
+
+---
+
+## 17. Tax / Work Receipts
+
+Tax / Work Receipts is the second section of the same app and account. It is
+year-based rather than trip-based and reuses Google authentication, Gemini OCR,
+Turso, the Worker API and the existing R2 bucket.
+
+### Flow
+
+1. Home menu → **Tax / Work Receipts**
+2. **Capture Receipt** → camera, photo or PDF; a local draft is saved automatically
+3. Gemini selects the editable Type and fills editable Date and Amount
+4. User enters Description and corrects any detected value before tapping Done
+5. Metadata and receipt sync in the background
+6. Browse most recently scanned receipts first; yearly count/total use final `amount`
+
+Supported types: Flight, Car, Bus, Taxi / Auto, Train, Meal and Other.
+Other supports House Rent Receipt or a user-entered Custom description. The app
+organizes records and does not make tax-deductibility claims.
+
+Each receipt stores its own ISO currency code. The capture screen defaults from
+the device region and allows manual selection. Mixed-currency years show one
+total per currency; amounts are never combined or converted across currencies.
+
+### Storage and retention
+
+- Local key: `local_tax_work_expenses_v1:{userId}`
+- Turso table: `tax_work_expenses`
+- R2 key: `receipts/{userId}/tax-work/{expenseId}/{uuid}.{ext}`
+- Retention marker: `tax_work_3_year_minimum`
+- No scheduled deletion applies to Tax / Work records.
+- Hidden years are stored in `tax_work_year_preferences` and sync across devices.
+
+The separate table is intentional: the existing Business Travel `expenses`
+table requires `trip_id`, so changing it would risk existing trip data and
+retention behavior. It remains the same Turso database and shared data layer.
+
+### API
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/upload` | Upload image or PDF body; returns `{ key, url }` |
-| `GET` | `/receipts/<key>` | Serve stored object |
-| `GET` | `/` | Health / endpoint list JSON |
-| `OPTIONS` | `*` | CORS |
-
-Accepts: `image/*`, `application/pdf`, `application/octet-stream`.
-
-### Receipt upload flow (app)
-
-1. Camera (`expo-image-picker`) **or** document picker (`expo-document-picker`, images + PDF).
-2. Navigate to `trip/[id]/receipt`.
-3. User confirms amount.
-4. `uploadReceiptToR2()` in `src/services/receipt-upload.ts` POSTs file to Worker.
-5. Remote URL stored via `setPendingReceipt` in context.
-6. Add Expense screen applies pending receipt → `receiptUri` / `receiptStatus: 'attached'`.
-7. Save expense writes `receipt_uri` to Turso.
-
-### Worker commands
-
-```bash
-cd "/Users/apple/Documents/AI Business related/mobileapp/my-first-app/workers/receipt-upload"
-npm install
-npx wrangler login
-npx wrangler whoami
-npx wrangler secret put UPLOAD_SECRET
-npx wrangler deploy
-```
-
-Deployed URL (as of assessment):
-
-```text
-https://receipt-upload.jamesraj2050.workers.dev
-```
-
-After changing Worker code:
-
-```bash
-cd workers/receipt-upload && npx wrangler deploy
-```
-
-After changing Expo `.env`:
-
-```bash
-cd "/Users/apple/Documents/AI Business related/mobileapp/my-first-app"
-npx expo start --clear
-```
-
----
-
-## 6. Data models (`src/types/expense.ts`)
-
-### Trip
-
-- `id: string`
-- `from`, `to: string`
-- `startDate`, `endDate: string` (YYYY-MM-DD)
-- `name: string`
-- `status: 'active' | 'finished'`
-- `expenses: Expense[]`
-- `createdAt: string`
-
-### Expense
-
-- `id: string`
-- `type: ExpenseType` (flight, car, taxi, meal, lunch, dinner, bus, parking, other)
-- `date: string`
-- `amount: number`
-- `description: string`
-- `receiptUri: string | null`
-- `receiptStatus: 'attached' | 'missing'`
-- `createdAt: string`
-
-### Pending receipt (context only)
-
-- `tripId`, `receiptUri`, `amount` — handoff after R2 upload; not persisted alone.
-
----
-
-## 7. Authentication & user concept (current)
-
-| Question | Answer |
-|---|---|
-| Google auth? | **No** |
-| Login / session? | **No** |
-| `user_id` on trips/expenses? | **No** |
-| Accounts table? | **No** |
-| Subscription / billing? | **No** |
-
-Only “auth” today:
-
-- Turso DB token (client-embedded `EXPO_PUBLIC_…`)
-- Shared Worker upload secret (also `EXPO_PUBLIC_…`)
-
----
-
-## 8. API / server-side routes
-
-| Surface | Routes |
-|---|---|
-| Expo Router app | Screen routes only — **no** API route handlers |
-| Cloudflare Worker | `POST /upload`, `GET /receipts/<key>` |
-| Turso | Remote SQL over HTTP from the **client** |
-
----
-
-## 9. Environment variables (names only — never commit values)
-
-### Expo `.env`
-
-- `EXPO_PUBLIC_TURSO_DATABASE_URL`
-- `EXPO_PUBLIC_TURSO_AUTH_TOKEN`
-- `EXPO_PUBLIC_RECEIPT_UPLOAD_URL`
-- `EXPO_PUBLIC_RECEIPT_UPLOAD_SECRET`
-
-### Worker (Cloudflare)
-
-- `UPLOAD_SECRET` (Wrangler secret)
-- R2 binding `RECEIPTS` → bucket `first-mobile-app`
-
-### Correct receipt URL shape
-
-```bash
-# Correct (base URL only — app appends /upload)
-EXPO_PUBLIC_RECEIPT_UPLOAD_URL=https://receipt-upload.jamesraj2050.workers.dev
-
-# Wrong (placeholder / path)
-EXPO_PUBLIC_RECEIPT_UPLOAD_URL=https://your-worker.workers.dev/upload-url
-```
-
----
-
-## 10. Product / commercial context (for auth design)
-
-Planned subscription:
-
-- **$4 / month** billed monthly, or
-- **$2 / month** equivalent if paid annually
-
-Implication: identity must exist **before** durable writes and uploads.
-
-**Recommended UX:** Google sign-in first (or immediately before first write), not “fill form then auth at save”.
-
----
-
-## 11. What must change for safe Google authentication
-
-### Risks if auth is bolted on naively
-
-1. Shared Turso token in the client can read/write **all** trips.
-2. No per-user filtering (`SELECT * FROM trips`).
-3. Shared upload secret allows anyone with the app build to upload.
-4. Receipt GET URLs are weakly protected (URL knowledge ≈ access).
-5. Subscription cannot attach to an anonymous device.
-
-### Files likely affected (implementation later)
-
-**Auth / navigation**
-
-- `src/app/_layout.tsx`
-- New: `src/app/(auth)/login.tsx` (or similar)
-- New: `src/context/auth-context.tsx` (or provider from Clerk/Supabase/Firebase)
-- `app.json` (scheme, Google/OAuth plugin config)
-
-**Turso**
-
-- `src/db/turso.ts` (schema migration: `user_id`)
-- `src/storage/trips.ts` (scoped queries)
-- `src/types/expense.ts` (`userId` on Trip / Expense)
-- `src/context/trip-context.tsx` (pass user into CRUD)
-
-**R2 Worker**
-
-- `workers/receipt-upload/src/index.ts` (JWT verify; path prefix `receipts/{userId}/…`)
-- `workers/receipt-upload/wrangler.toml` (if new env/bindings)
-- `src/services/receipt-upload.ts` (send Bearer token instead of shared secret)
-
-**Env / docs**
-
-- `.env.example`
-- `workers/receipt-upload/README.md`
-- Possibly this `README1.md` update after implementation
-
-**Package.json** (when implementing — not done in assessment)
-
-- Auth SDK (e.g. `@supabase/supabase-js`, Clerk, or Firebase)
-- Expo auth helpers as needed (`expo-auth-session`, `expo-web-browser` already present)
-
----
-
-## 12. Recommended implementation plan
-
-Do **not** break existing Turso or R2. Extend them.
-
-### Phase A — Identity
-
-1. Choose provider (recommendation: **Supabase Auth** with Google; alternatives Clerk / Firebase).
-2. Add Google OAuth client IDs (iOS / Android / Web as needed).
-3. Add `AuthProvider` + login screen.
-4. Gate app stack: signed-in required before My Trips writes (at minimum before Create Trip / Add Expense / Upload).
-5. Persist session across relaunches.
-
-### Phase B — Turso per-user isolation (additive)
-
-1. Migration:
-
-```sql
-ALTER TABLE trips ADD COLUMN user_id TEXT;
--- backfill strategy for existing rows (assign owner or quarantine)
-CREATE INDEX IF NOT EXISTS idx_trips_user_id ON trips(user_id);
-```
-
-2. Optionally add `user_id` on `expenses` (or rely on trip ownership).
-3. Update:
-
-```sql
-SELECT * FROM trips WHERE user_id = ? ORDER BY created_at DESC;
-INSERT INTO trips (..., user_id) VALUES (..., ?);
-```
-
-4. Longer-term (safer): move Turso writes behind an authenticated Worker/Edge API so the DB token is not embedded in the app. Short-term client Turso is acceptable only with strict `user_id` filtering and acceptance of token exposure risk.
-
-### Phase C — R2 hardening (keep Worker + bucket)
-
-1. Object keys: `receipts/{userId}/{uuid}.{ext}`.
-2. Replace `X-Upload-Secret` with verified **Google/Supabase JWT** (`Authorization: Bearer …`).
-3. Authorize `GET /receipts/...` the same way (or short-lived signed URLs).
-4. Keep R2 **binding**; do not add R2 Access Key to Expo `.env`.
-
-### Phase D — Subscription
-
-1. After login, check entitlement (RevenueCat and/or Stripe).
-2. Plans: `$4/mo` monthly or annual equivalent `$2/mo`.
-3. Paywall before active use; bind entitlement to auth `user_id`.
-
-### Safe order
-
-```text
-Google login
-  → user_id on Turso
-  → scoped R2 paths + JWT on Worker
-  → subscription / paywall
-```
-
----
-
-## 13. Suggested commands checklist for the implementing agent
-
-```bash
-# App
-cd "/Users/apple/Documents/AI Business related/mobileapp/my-first-app"
-npx expo start --clear
-npx tsc --noEmit
-npx expo lint
-
-# Worker
-cd workers/receipt-upload
-npx wrangler deploy
-npx wrangler secret list
-
-# Git (only if user requests commit)
-git status
-git diff
-```
-
-Install packages **only when implementing** (not during assessment). Example (Supabase path — confirm against current Expo SDK docs before installing):
-
-```bash
-npx expo install expo-auth-session expo-crypto
-# plus provider SDK as chosen
-```
-
-Always re-check Expo SDK 57 docs before adding auth packages:
-
-- https://docs.expo.dev/llms.txt
-- https://docs.expo.dev/versions/v57.0.0/
-
----
-
-## 14. Concise verdict
-
-The Travel Expense Capture app is a working **single-tenant** Expo Router client that:
-
-- Persists trips/expenses in **Turso** from the device.
-- Stores receipts in **Cloudflare R2** via a dedicated Worker.
-- Has **no** user accounts, Google login, or subscription gating yet.
-
-To add Google authentication safely for a paid multi-user product: introduce identity first, then scope Turso rows and R2 objects by `user_id`, then harden the Worker to JWT auth, then add billing — without replacing Turso or R2.
+| GET / POST | `/tax-work/expenses` | List or create authenticated user's records |
+| PATCH / DELETE | `/tax-work/expenses/:expenseId` | Edit or manually delete one record |
+| POST | `/tax-work/sync` | Local-first batch upsert and user snapshot |
+| POST | `/tax-work/receipts/upload` | R2 upload with `X-Expense-Id` |
+| GET | `/tax-work/years/hidden` | List hidden years |
+| PUT / DELETE | `/tax-work/years/:year/hidden` | Hide or restore a year |
+| DELETE | `/tax-work/years/:year` | Permanently delete the year and its receipts |
+
+`GET /receipts/:key` authorizes both Business Travel and Tax / Work ownership
+from Turso before returning an R2 object. The client never supplies or controls
+the database `user_id`.
+
+### Migration and configuration
+
+No manual SQL or new environment variable is required. The existing
+`ensureSchema` migration creates the table and indexes on the next authenticated
+API request after Worker deployment.

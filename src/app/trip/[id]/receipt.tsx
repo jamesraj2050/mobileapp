@@ -1,14 +1,13 @@
 import { Image } from 'expo-image';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { FieldInput, FieldLabel, PrimaryButton, Screen } from '@/components/ui-kit';
 import { Spacing } from '@/constants/theme';
 import { useTrips } from '@/context/trip-context';
 import { useTheme } from '@/hooks/use-theme';
-import { isPdfMimeOrUri, uploadReceiptToR2 } from '@/services/receipt-upload';
-import { suggestReceiptAmount } from '@/utils/format';
+import { extractReceiptFields, isPdfMimeOrUri, normalizeReceiptMime } from '@/services/api';
 
 function paramString(value: string | string[] | undefined): string {
   if (typeof value === 'string') return value;
@@ -29,41 +28,72 @@ export default function ReceiptConfirmScreen() {
   const fileName = paramString(params.name) || 'receipt';
   const router = useRouter();
   const colors = useTheme();
-  const { setPendingReceipt } = useTrips();
+  const { saveReceiptExpense } = useTrips();
 
   const isPdf = isPdfMimeOrUri(mimeType, uri);
-  const suggested = useMemo(() => suggestReceiptAmount(), []);
-  const [amount, setAmount] = useState(suggested.toFixed(2));
-  const [uploading, setUploading] = useState(false);
+  const [amount, setAmount] = useState('');
+  const [detectedAmount, setDetectedAmount] = useState<number | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractHint, setExtractHint] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  const onConfirm = async () => {
+  useEffect(() => {
+    if (!uri) return;
+    let cancelled = false;
+    (async () => {
+      setExtracting(true);
+      setExtractHint(null);
+      try {
+        const extraction = await extractReceiptFields({
+          localUri: uri,
+          mimeType: normalizeReceiptMime(mimeType, uri),
+        });
+        if (cancelled) return;
+        if (extraction.amount != null) {
+          setDetectedAmount(extraction.amount);
+          setAmount(extraction.amount.toFixed(2));
+          setExtractHint(`Suggested $${extraction.amount.toFixed(2)} — edit if needed.`);
+        } else {
+          setExtractHint('Could not read amount — enter it manually.');
+        }
+      } catch {
+        if (!cancelled) {
+          setExtractHint('AI read unavailable — enter amount manually.');
+        }
+      } finally {
+        if (!cancelled) setExtracting(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uri, mimeType]);
+
+  const onSave = async () => {
     if (!uri) {
-      Alert.alert('Missing receipt', 'No receipt file to upload.');
+      Alert.alert('Missing receipt', 'No receipt file to save.');
       return;
     }
 
     const parsed = Number(amount.replace(/[^0-9.]/g, ''));
-    const confirmed = Number.isFinite(parsed) && parsed > 0 ? parsed.toFixed(2) : '';
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      Alert.alert('Amount required', 'Enter the amount (AI is only a suggestion).');
+      return;
+    }
 
-    setUploading(true);
+    setSaving(true);
     try {
-      const remoteUrl = await uploadReceiptToR2(
-        uri,
-        mimeType || (isPdf ? 'application/pdf' : 'image/jpeg')
-      );
-      setPendingReceipt({
+      await saveReceiptExpense({
         tripId: id,
-        receiptUri: remoteUrl,
-        amount: confirmed,
+        localUri: uri,
+        amount: Math.round(parsed * 100) / 100,
+        detectedAmount,
       });
-      router.back();
+      router.replace(`/trip/${id}`);
     } catch (e) {
-      Alert.alert(
-        'Upload failed',
-        e instanceof Error ? e.message : 'Could not upload receipt to Cloudflare R2.'
-      );
+      Alert.alert('Save failed', e instanceof Error ? e.message : 'Could not save expense locally.');
     } finally {
-      setUploading(false);
+      setSaving(false);
     }
   };
 
@@ -71,16 +101,19 @@ export default function ReceiptConfirmScreen() {
     <Screen>
       <Stack.Screen options={{ title: 'Receipt captured ✓' }} />
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <FieldLabel>Detected Amount</FieldLabel>
+        <FieldLabel>Amount</FieldLabel>
         <FieldInput
-          value={amount.startsWith('$') ? amount : `$ ${amount}`}
+          value={amount ? (amount.startsWith('$') ? amount : `$ ${amount}`) : ''}
           onChangeText={(text) => setAmount(text.replace(/^\$\s?/, ''))}
+          placeholder={extracting ? 'Detecting… or type amount' : 'Enter amount'}
           keyboardType="decimal-pad"
           style={styles.amountInput}
+          editable
         />
         <Text style={[styles.hint, { color: colors.textSecondary }]}>
-          Amount can be edited. OCR suggests — you confirm. Confirm also uploads the receipt to
-          Cloudflare R2.
+          {extracting
+            ? 'Reading receipt with AI…'
+            : extractHint ?? 'Enter amount manually. You can save immediately.'}
         </Text>
 
         {uri ? (
@@ -102,10 +135,13 @@ export default function ReceiptConfirmScreen() {
         ) : null}
 
         <PrimaryButton
-          label={uploading ? 'UPLOADING…' : 'CONFIRM'}
-          onPress={onConfirm}
-          disabled={uploading}
+          label={saving ? 'SAVING…' : 'SAVE'}
+          onPress={() => void onSave()}
+          disabled={saving}
         />
+        <Text style={[styles.footer, { color: colors.textSecondary }]}>
+          Saves on this device instantly. Cloud sync runs in the background.
+        </Text>
       </ScrollView>
     </Screen>
   );
@@ -160,5 +196,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     textAlign: 'center',
     paddingHorizontal: Spacing.three,
+  },
+  footer: {
+    marginTop: Spacing.three,
+    textAlign: 'center',
+    fontSize: 13,
   },
 });

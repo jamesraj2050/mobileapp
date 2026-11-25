@@ -1,3 +1,5 @@
+import { randomUUID } from 'expo-crypto';
+
 const MONTHS = [
   'Jan',
   'Feb',
@@ -18,6 +20,13 @@ export function formatDate(iso: string): string {
   const [y, m, d] = iso.split('-').map(Number);
   if (!y || !m || !d) return iso;
   return `${d} ${MONTHS[m - 1]} ${y}`;
+}
+
+/** Short date for expense rows: "28 Sep" */
+export function formatDateShort(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  if (!y || !m || !d) return iso;
+  return `${d} ${MONTHS[m - 1]}`;
 }
 
 /** Format range as "20 Sep – 23 Sep 2026" or "20 Sep 2026 – 2 Oct 2026" */
@@ -49,6 +58,60 @@ export function todayIso(): string {
   return `${y}-${m}-${d}`;
 }
 
+/** Accept common unambiguous date formats and convert to stored YYYY-MM-DD. */
+export function parseDateInput(value: string): string | null {
+  const input = value.trim();
+  const yearFirst = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(input);
+  const dayFirst = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/.exec(input);
+  const namedMonth = /^(\d{1,2})\s+([a-zA-Z]{3,9})\s+(\d{4})$/.exec(input);
+
+  let day: number;
+  let month: number;
+  let year: number;
+  if (yearFirst) {
+    year = Number(yearFirst[1]);
+    month = Number(yearFirst[2]);
+    day = Number(yearFirst[3]);
+  } else if (dayFirst) {
+    day = Number(dayFirst[1]);
+    month = Number(dayFirst[2]);
+    year = Number(dayFirst[3]);
+  } else if (namedMonth) {
+    const monthIndex = MONTHS.findIndex(
+      (monthName) => monthName.toLowerCase() === namedMonth[2].slice(0, 3).toLowerCase()
+    );
+    if (monthIndex < 0) return null;
+    day = Number(namedMonth[1]);
+    month = monthIndex + 1;
+    year = Number(namedMonth[3]);
+  } else {
+    return null;
+  }
+
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/** "perth" → "Perth", "GOLD COAST" → "Gold Coast" */
+export function formatPlaceName(raw: string): string {
+  return raw
+    .replace(/\s+/g, ' ')
+    .split(' ')
+    .map((word) => {
+      if (!word) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
 /** Brisbane_to_Melbourne_20Sep2026 */
 export function generateTripName(from: string, to: string, startDate: string): string {
   const clean = (s: string) =>
@@ -62,12 +125,14 @@ export function generateTripName(from: string, to: string, startDate: string): s
   return `${clean(from)}_to_${clean(to)}_${dayPart}`;
 }
 
-export function createId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+/** Stable device-generated UUID for idempotent sync. */
+export function createId(_prefix?: string): string {
+  return randomUUID();
 }
 
-/** Stage-1 OCR stub: suggests an amount the employee must confirm. */
-export function suggestReceiptAmount(): number {
-  // Demo suggestion matching PLD example; real OCR can replace this later.
-  return 38.7;
+export function syncGlyph(status: string): string {
+  if (status === 'synced') return '✓';
+  if (status === 'syncing') return '↻';
+  if (status === 'failed') return '⚠';
+  return '⚠';
 }

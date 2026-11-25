@@ -4,14 +4,17 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "secret": "wrangler secret put UPLOAD_SECRET"
-  },
-  "devDependencies": {
-    "wrangler": "^4.40.0",
-    "@cloudflare/workers-types": "^4.20250926.0",
-    "typescript": "^5.9.2"
+    "secret:turso-url": "wrangler secret put TURSO_DATABASE_URL",
+    "secret:turso-token": "wrangler secret put TURSO_AUTH_TOKEN",
+    "secret:google": "wrangler secret put GOOGLE_CLIENT_IDS",
+    "secret:gemini": "wrangler secret put GEMINI_API_KEY"
   },
   "dependencies": {
-    "expo-document-picker": "~57.0.2"
+    "jose": "^6.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250926.0",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.40.0"
   }
 }

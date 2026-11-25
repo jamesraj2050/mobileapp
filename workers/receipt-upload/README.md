@@ -1,45 +1,61 @@
-# Receipt upload Worker (Cloudflare R2)
+# Travel Expenses API (Cloudflare Worker)
 
-Uploads receipt images to your R2 bucket `first-mobile-app` and serves them back.
+Authenticated API for trips, expenses, receipt upload (R2), and batch sync.
+Turso credentials stay server-side. Mobile never talks to Turso or R2 directly.
 
-## One-time setup
+## Secrets
 
 ```bash
 cd workers/receipt-upload
-npm install
-npx wrangler login
+npx wrangler secret put TURSO_DATABASE_URL
+npx wrangler secret put TURSO_AUTH_TOKEN
+npx wrangler secret put GOOGLE_CLIENT_IDS
+npx wrangler secret put GEMINI_API_KEY
 ```
 
-Create a shared upload secret (pick any long random string):
+`GOOGLE_CLIENT_IDS` is a comma-separated list of Google OAuth client IDs
+(iOS, Android, and/or Web) whose ID tokens this Worker will accept.
 
-```bash
-npx wrangler secret put UPLOAD_SECRET
-```
+`GEMINI_API_KEY` comes from [Google AI Studio](https://aistudio.google.com/apikey)
+(free tier). Used only server-side for receipt field extraction.
 
-Deploy:
+Optional: set `GEMINI_MODEL` (default `gemini-2.0-flash`) via wrangler vars or `.dev.vars`.
+
+## Deploy
 
 ```bash
 npx wrangler deploy
 ```
 
-If deploy fails because of jurisdiction, edit `wrangler.toml` and remove the `jurisdiction = "oc"` line, then deploy again.
+## Endpoints
 
-## Connect the Expo app
+| Method | Path | Auth |
+|--------|------|------|
+| GET | `/health` | no |
+| GET | `/me` | Bearer Google ID token |
+| GET/POST | `/trips` | yes |
+| GET/PATCH/DELETE | `/trips/:tripId` | yes |
+| POST | `/trips/:tripId/expenses` | yes |
+| PATCH/DELETE | `/trips/:tripId/expenses/:expenseId` | yes |
+| POST | `/sync` | yes (batch upsert) |
+| POST | `/receipts/extract` | yes (raw image/PDF body → Gemini: amount, date, from, to) |
+| POST | `/receipts/upload` | yes (+ `X-Trip-Id`, `X-Expense-Id`) |
+| GET | `/receipts/:key` | yes (owner only) |
+| GET/POST | `/tax-work/expenses` | yes |
+| PATCH/DELETE | `/tax-work/expenses/:expenseId` | yes |
+| POST | `/tax-work/sync` | yes (batch upsert) |
+| POST | `/tax-work/receipts/upload` | yes (+ `X-Expense-Id`) |
+| GET | `/tax-work/years/hidden` | yes |
+| PUT/DELETE | `/tax-work/years/:year/hidden` | yes (hide/restore) |
+| DELETE | `/tax-work/years/:year` | yes (permanent year deletion) |
 
-In the project root `.env` add (use your real worker URL from deploy output):
+R2 binding: `RECEIPTS` → bucket `first-mobile-app`.
 
-```bash
-EXPO_PUBLIC_RECEIPT_UPLOAD_URL=https://receipt-upload.<your-subdomain>.workers.dev
-EXPO_PUBLIC_RECEIPT_UPLOAD_SECRET=the-same-secret-you-set-above
-```
+## Retention
 
-Restart Expo:
-
-```bash
-npx expo start --clear
-```
-
-## Notes
-
-- R2 Access Key / Secret stay in Cloudflare only (bucket binding). You do **not** put them in Expo.
-- `EXPO_PUBLIC_RECEIPT_UPLOAD_SECRET` is a light gate for prototypes; replace with real auth before production.
+- Business Travel and Tax / Work data have a minimum three-year retention policy.
+- There is no scheduled age-based deletion job.
+- Data remains available until the authenticated user explicitly deletes it.
+- Manual trip deletion removes the trip's Turso rows and R2 prefix.
+- Tax years may be hidden and restored; permanent year deletion removes every
+  expense row and R2 receipt for that user and year.

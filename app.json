@@ -8,9 +8,11 @@
     "scheme": "myfirstapp",
     "userInterfaceStyle": "automatic",
     "ios": {
+      "bundleIdentifier": "com.arkconsultinggroup.travelexpenses",
       "icon": "./assets/expo.icon"
     },
     "android": {
+      "package": "com.arkconsultinggroup.travelexpenses",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -40,11 +42,21 @@
           "cameraPermission": "Allow Travel Expenses to use the camera to scan receipts.",
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-secure-store",
+      "expo-sharing",
+      "@react-native-community/datetimepicker",
+      "expo-localization"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "1766797b-513a-4ac0-816e-8abe4ed63177"
+      }
     }
   }
 }

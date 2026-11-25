@@ -1,39 +1,129 @@
 import { Link, Stack, useRouter } from 'expo-router';
+import { useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 
-import { Screen } from '@/components/ui-kit';
-import { Spacing } from '@/constants/theme';
+import { ArkLogo } from '@/components/ark-logo';
+import { BrandStrip } from '@/components/brand-strip';
+import { PrimaryButton, Screen } from '@/components/ui-kit';
+import { Brand, MaxContentWidth, Spacing } from '@/constants/theme';
+import { useAuth } from '@/context/auth-context';
 import { useTrips } from '@/context/trip-context';
 import { useTheme } from '@/hooks/use-theme';
-import { receiptCounts, tripTotal } from '@/storage/trips';
+import { receiptCounts, tripTotal } from '@/storage/local-store';
 import type { Trip } from '@/types/expense';
-import { formatDateRange, formatMoney } from '@/utils/format';
+import { formatDate, formatMoney, syncGlyph } from '@/utils/format';
+
+const TRIPS_COLUMN = Math.min(560, MaxContentWidth);
 
 export default function MyTripsScreen() {
-  const { trips, ready, error } = useTrips();
+  const { session, ready: authReady, signingIn, error: authError, signIn, signOut, configured, redirectUri } =
+    useAuth();
+  const { trips, ready, error, deleteTrip } = useTrips();
+  const [deletingTripId, setDeletingTripId] = useState<string | null>(null);
   const router = useRouter();
   const colors = useTheme();
+  const { width } = useWindowDimensions();
+  const columnWidth = Math.min(TRIPS_COLUMN, width - Spacing.four * 2);
+  const handleSignOut = async () => {
+    await signOut();
+    router.replace('/');
+  };
+  const confirmDeleteTrip = (trip: Trip) => {
+    const tripLabel = trip.name || `${trip.from} to ${trip.to}`;
+    const message = `Delete "${tripLabel}" and all its expenses and receipts? This cannot be undone.`;
+    const remove = async () => {
+      setDeletingTripId(trip.id);
+      try {
+        await deleteTrip(trip.id);
+      } catch (deleteError) {
+        Alert.alert(
+          'Could not delete trip',
+          deleteError instanceof Error ? deleteError.message : 'Please try again.'
+        );
+      } finally {
+        setDeletingTripId(null);
+      }
+    };
+
+    if (Platform.OS === 'web') {
+      if (globalThis.confirm(message)) {
+        void remove();
+      }
+      return;
+    }
+
+    Alert.alert('Delete trip?', message, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => void remove() },
+    ]);
+  };
+
+  if (!authReady) {
+    return (
+      <Screen>
+        <View style={styles.centered}>
+          <ActivityIndicator />
+        </View>
+      </Screen>
+    );
+  }
+
+  if (!session) {
+    return (
+      <Screen>
+        <Stack.Screen options={{ title: 'Travel Expenses', headerShown: false }} />
+        <View style={styles.welcome}>
+          <View style={styles.welcomeLogo}>
+            <ArkLogo hero />
+          </View>
+          <View style={styles.welcomeBody}>
+            <Text style={[styles.brand, { color: colors.text }]}>Travel Expenses</Text>
+            <Text style={[styles.tagline, { color: colors.textSecondary }]}>
+              Capture a receipt in about 15 seconds — even offline. Cloud sync happens in the
+              background.
+            </Text>
+            {!configured ? (
+              <Text style={[styles.emptyBody, { color: '#C47F00' }]}>
+                Add Google OAuth client IDs to .env (see .env.example), then restart with npx expo
+                start --clear
+              </Text>
+            ) : null}
+            {authError ? (
+              <Text style={[styles.emptyBody, { color: '#B00020' }]}>{authError}</Text>
+            ) : null}
+            <PrimaryButton
+              label={signingIn ? 'SIGNING IN…' : 'Continue with Google'}
+              onPress={() => void signIn()}
+              disabled={signingIn || !configured}
+            />
+            {configured ? (
+              <Text style={[styles.redirectHint, { color: colors.textSecondary }]}>
+                If Allow gets stuck, open this app in Chrome/Safari (not Cursor’s browser).{'\n'}
+                Google Cloud → Web client → Authorized redirect URIs must include:{'\n'}
+                {redirectUri}
+              </Text>
+            ) : null}
+          </View>
+        </View>
+      </Screen>
+    );
+  }
 
   return (
     <Screen>
       <Stack.Screen
         options={{
-          title: 'My Trips',
-          headerRight: () => (
-            <Pressable
-              onPress={() => router.push('/create-trip')}
-              hitSlop={12}
-              accessibilityLabel="Create trip">
-              <Text style={[styles.plus, { color: colors.text }]}>+</Text>
-            </Pressable>
-          ),
+          headerShown: false,
         }}
       />
 
@@ -43,34 +133,57 @@ export default function MyTripsScreen() {
         </View>
       ) : error ? (
         <View style={styles.centered}>
-          <Text style={[styles.emptyTitle, { color: colors.text }]}>Turso connection failed</Text>
+          <Text style={[styles.emptyTitle, { color: colors.text }]}>Could not load trips</Text>
           <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>{error}</Text>
-          <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
-            Check .env values, then restart with npx expo start --clear
-          </Text>
         </View>
       ) : trips.length === 0 ? (
         <View style={styles.centered}>
-          <Text style={[styles.emptyTitle, { color: colors.text }]}>No trips yet</Text>
-          <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
-            Create a trip, then capture receipts as you travel.
-          </Text>
-          <Link href="/create-trip" asChild>
-            <Pressable style={styles.emptyCta}>
-              <Text style={styles.emptyCtaText}>Create Trip</Text>
-            </Pressable>
-          </Link>
+          <View style={[styles.column, { width: columnWidth }]}>
+            <BrandStrip
+              title="My Trips"
+              onHome={() => router.navigate('/')}
+              onSignOut={() => void handleSignOut()}
+              onBusinessTravel={() => router.replace('/')}
+              onTaxWork={() => router.push('/tax-work')}
+              onAdd={() => router.push('/create-trip')}
+            />
+            <Text style={[styles.emptyTitle, { color: colors.text }]}>No trips yet</Text>
+            <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
+              Create a trip, then add expenses as you travel.
+            </Text>
+            <Link href="/create-trip" asChild>
+              <Pressable style={styles.emptyCta}>
+                <Text style={styles.emptyCtaText}>Create Trip</Text>
+              </Pressable>
+            </Link>
+          </View>
         </View>
       ) : (
         <FlatList
           data={trips}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.list}
-          ItemSeparatorComponent={() => (
-            <View style={[styles.separator, { backgroundColor: colors.backgroundSelected }]} />
-          )}
+          ListHeaderComponent={
+            <View style={[styles.column, { width: columnWidth, alignSelf: 'center' }]}>
+              <BrandStrip
+                title="My Trips"
+                onHome={() => router.navigate('/')}
+                onSignOut={() => void handleSignOut()}
+                onBusinessTravel={() => router.replace('/')}
+                onTaxWork={() => router.push('/tax-work')}
+                onAdd={() => router.push('/create-trip')}
+              />
+            </View>
+          }
           renderItem={({ item }) => (
-            <TripRow trip={item} onPress={() => router.push(`/trip/${item.id}`)} />
+            <View style={[styles.column, { width: columnWidth, alignSelf: 'center' }]}>
+              <TripRow
+                trip={item}
+                onPress={() => router.push(`/trip/${item.id}`)}
+                onDelete={() => confirmDeleteTrip(item)}
+                deleting={deletingTripId === item.id}
+              />
+            </View>
           )}
         />
       )}
@@ -78,63 +191,158 @@ export default function MyTripsScreen() {
   );
 }
 
-function TripRow({ trip, onPress }: { trip: Trip; onPress: () => void }) {
+function TripRow({
+  trip,
+  onPress,
+  onDelete,
+  deleting,
+}: {
+  trip: Trip;
+  onPress: () => void;
+  onDelete: () => void;
+  deleting: boolean;
+}) {
   const colors = useTheme();
   const total = tripTotal(trip);
   const { expenses } = receiptCounts(trip);
 
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.row, pressed && styles.pressed]}>
-      <View style={styles.rowTop}>
-        <Text style={[styles.route, { color: colors.text }]}>
-          {trip.from} → {trip.to}
-        </Text>
-        {trip.status === 'finished' ? (
-          <Text style={[styles.badge, { color: colors.textSecondary }]}>FINISHED</Text>
-        ) : (
-          <Text style={[styles.badgeActive, { color: '#1A73E8' }]}>ACTIVE</Text>
-        )}
-      </View>
-      <Text style={[styles.dates, { color: colors.textSecondary }]}>
-        {formatDateRange(trip.startDate, trip.endDate)}
-      </Text>
-      <View style={styles.meta}>
-        <Text style={[styles.total, { color: colors.text }]}>{formatMoney(total)}</Text>
-        <Text style={[styles.count, { color: colors.textSecondary }]}>
+    <View
+      style={[
+        styles.row,
+        {
+          backgroundColor: colors.backgroundElement,
+          borderColor: colors.backgroundSelected,
+        },
+      ]}>
+      <Pressable
+        onPress={onPress}
+        style={({ pressed }) => [styles.rowContent, pressed && styles.pressed]}>
+        <View style={styles.rowTop}>
+          <Text style={[styles.route, { color: colors.text }]} numberOfLines={2}>
+            {trip.from} → {trip.to}
+          </Text>
+          <View style={styles.statusBlock}>
+            <Text style={{ color: colors.textSecondary, fontSize: 13 }}>
+              {syncGlyph(trip.syncStatus)}
+            </Text>
+            {trip.status === 'finished' ? (
+              <Text style={[styles.badge, { color: colors.textSecondary }]}>FINISHED</Text>
+            ) : (
+              <Text style={[styles.badgeActive, { color: Brand.primary }]}>ACTIVE</Text>
+            )}
+          </View>
+        </View>
+        <Text style={[styles.dates, { color: colors.textSecondary }]}>
+          Start : {formatDate(trip.startDate)}
+          {'  ·  '}
           {expenses} {expenses === 1 ? 'expense' : 'expenses'}
         </Text>
-      </View>
-    </Pressable>
+        <Text style={[styles.total, { color: colors.text }]}>{formatMoney(total)}</Text>
+      </Pressable>
+      <Pressable
+        onPress={onDelete}
+        disabled={deleting}
+        hitSlop={6}
+        accessibilityRole="button"
+        accessibilityLabel={`Delete ${trip.name || `${trip.from} to ${trip.to}`}`}
+        style={({ pressed }) => [
+          styles.deleteButton,
+          pressed && styles.deleteButtonPressed,
+        ]}>
+        <Text style={styles.deleteIcon}>{deleting ? '…' : '🗑'}</Text>
+      </Pressable>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  plus: {
-    fontSize: 28,
-    fontWeight: '400',
-    paddingHorizontal: 4,
-    lineHeight: 32,
+  welcome: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: Spacing.four,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.five,
+  },
+  welcomeLogo: {
+    width: '100%',
+    maxWidth: 520,
+    alignItems: 'center',
+    marginBottom: Spacing.four,
+  },
+  welcomeBody: {
+    width: '100%',
+    maxWidth: 420,
+    gap: Spacing.three,
+  },
+  brand: {
+    fontSize: 32,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  tagline: {
+    fontSize: 16,
+    lineHeight: 24,
+    textAlign: 'center',
+    marginBottom: Spacing.two,
+  },
+  column: {
+    maxWidth: TRIPS_COLUMN,
   },
   list: {
-    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.four,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.six,
+    gap: Spacing.two,
   },
   row: {
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.four,
+    position: 'relative',
+    borderRadius: 14,
+    borderWidth: 1,
+    marginBottom: Spacing.two,
+  },
+  rowContent: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.three,
+    gap: Spacing.one,
   },
   pressed: {
-    opacity: 0.7,
+    opacity: 0.85,
   },
   rowTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: Spacing.two,
   },
   route: {
     fontSize: 18,
     fontWeight: '700',
     flex: 1,
+  },
+  statusBlock: {
+    alignItems: 'flex-end',
+    gap: 4,
+  },
+  deleteButton: {
+    position: 'absolute',
+    zIndex: 1,
+    right: Spacing.three,
+    bottom: Spacing.three,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#D7A0AA',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deleteButtonPressed: {
+    backgroundColor: '#FBEAEC',
+  },
+  deleteIcon: {
+    fontSize: 16,
+    lineHeight: 19,
   },
   badge: {
     fontSize: 11,
@@ -147,25 +355,12 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   dates: {
-    marginTop: 4,
     fontSize: 14,
-  },
-  meta: {
-    marginTop: Spacing.three,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
   },
   total: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '700',
-  },
-  count: {
-    fontSize: 14,
-  },
-  separator: {
-    height: StyleSheet.hairlineWidth,
-    marginHorizontal: Spacing.four,
+    marginTop: Spacing.one,
   },
   centered: {
     flex: 1,
@@ -177,17 +372,26 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: 22,
     fontWeight: '700',
+    textAlign: 'center',
+    marginTop: Spacing.two,
   },
   emptyBody: {
     fontSize: 15,
     textAlign: 'center',
     marginBottom: Spacing.three,
   },
+  redirectHint: {
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+    marginTop: Spacing.three,
+  },
   emptyCta: {
-    backgroundColor: '#1A73E8',
+    backgroundColor: Brand.primary,
     paddingHorizontal: Spacing.four,
     paddingVertical: 12,
     borderRadius: 12,
+    alignSelf: 'center',
   },
   emptyCtaText: {
     color: '#fff',

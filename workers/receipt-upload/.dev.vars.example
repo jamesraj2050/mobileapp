@@ -1,0 +1,9 @@
+# Copy to .dev.vars for local `wrangler dev` (gitignored).
+# Production: use `npx wrangler secret put <NAME>`
+
+TURSO_DATABASE_URL=libsql://your-db.turso.io
+TURSO_AUTH_TOKEN=your-turso-token
+GOOGLE_CLIENT_IDS=your-web-client-id.apps.googleusercontent.com,your-ios-client-id.apps.googleusercontent.com
+GEMINI_API_KEY=your-google-ai-studio-key
+# Optional:
+# GEMINI_MODEL=gemini-2.5-flash
