@@ -1,5 +1,5 @@
 import { Link, Stack, useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -29,6 +29,29 @@ export default function MyTripsScreen() {
   const { session, ready: authReady, signingIn, error: authError, signIn, signOut, configured, redirectUri } =
     useAuth();
   const { trips, ready, error, deleteTrip } = useTrips();
+  useEffect(() => {
+    // #region agent log
+    fetch('http://127.0.0.1:7782/ingest/0a45d84a-b160-4d87-9d50-39d0f82bc164', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7e5b01' },
+      body: JSON.stringify({
+        sessionId: '7e5b01',
+        location: 'index.tsx:sessionGate',
+        message: 'Home vs sign-in gate',
+        data: {
+          authReady,
+          hasSession: Boolean(session),
+          signingIn,
+          hasAuthError: Boolean(authError),
+          platform: Platform.OS,
+        },
+        timestamp: Date.now(),
+        hypothesisId: 'H3',
+        runId: 'post-fix',
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [authReady, session, signingIn, authError]);
   const [deletingTripId, setDeletingTripId] = useState<string | null>(null);
   const router = useRouter();
   const colors = useTheme();
@@ -106,7 +129,7 @@ export default function MyTripsScreen() {
               onPress={() => void signIn()}
               disabled={signingIn || !configured}
             />
-            {configured ? (
+            {configured && Platform.OS === 'web' ? (
               <Text style={[styles.redirectHint, { color: colors.textSecondary }]}>
                 If Allow gets stuck, open this app in Chrome/Safari (not Cursor’s browser).{'\n'}
                 Google Cloud → Web client → Authorized redirect URIs must include:{'\n'}
