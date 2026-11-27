@@ -1,6 +1,5 @@
 import * as Google from 'expo-auth-session/providers/google';
-import { exchangeCodeAsync, makeRedirectUri, type AuthSessionResult } from 'expo-auth-session';
-import * as Linking from 'expo-linking';
+import { makeRedirectUri, type AuthSessionResult } from 'expo-auth-session';
 import * as WebBrowser from 'expo-web-browser';
 import {
   createContext,
@@ -86,14 +85,6 @@ function logOAuthDiag(message: string, details?: Record<string, unknown>): void 
     return;
   }
   console.warn(OAUTH_DIAG, message);
-}
-
-const GOOGLE_CLIENT_ID_SUFFIX = '.apps.googleusercontent.com';
-
-function googleAndroidRedirectUri(clientId: string | undefined): string | undefined {
-  if (!clientId?.endsWith(GOOGLE_CLIENT_ID_SUFFIX)) return undefined;
-  const prefix = clientId.slice(0, -GOOGLE_CLIENT_ID_SUFFIX.length);
-  return prefix ? `com.googleusercontent.apps.${prefix}:/oauthredirect` : undefined;
 }
 
 function redirectUriShape(uri: string | null | undefined) {
@@ -199,12 +190,6 @@ function googleClientIds() {
   };
 }
 
-function clientIdForPlatform(ids: ReturnType<typeof googleClientIds>): string | undefined {
-  if (Platform.OS === 'ios') return ids.iosClientId || ids.clientId;
-  if (Platform.OS === 'android') return ids.androidClientId || ids.clientId;
-  return ids.webClientId || ids.clientId;
-}
-
 function clearWebAuthCallbackUrl(): void {
   if (Platform.OS !== 'web' || typeof window === 'undefined') return;
   const hash = window.location.hash;
@@ -238,15 +223,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const handledResponseRef = useRef<AuthSessionResult | null>(null);
 
   const ids = useMemo(() => googleClientIds(), []);
-  const configured = Boolean(ids.webClientId || ids.iosClientId || ids.androidClientId);
+  const configured =
+    Platform.OS === 'web'
+      ? Boolean(ids.webClientId)
+      : Boolean(
+          ids.webClientId &&
+            (Platform.OS === 'android' ? ids.androidClientId : ids.iosClientId)
+        );
 
-  // Web keeps localhost. Android Google clients redirect to the reversed client-ID
-  // scheme, not `${applicationId}:/oauthredirect`. iOS still uses AuthSession default.
+  // Web uses AuthSession. Native uses Google's Credential Manager / native SDK,
+  // which does not use a browser redirect URI on Android.
   const webRedirectUri =
     Platform.OS === 'web' ? makeRedirectUri({ preferLocalhost: true }) : undefined;
-  const androidRedirectUri =
-    Platform.OS === 'android' ? googleAndroidRedirectUri(ids.androidClientId) : undefined;
-  const platformRedirectUri = webRedirectUri ?? androidRedirectUri;
 
   const [request, response, promptAsync] = Google.useIdTokenAuthRequest(
     configured
@@ -255,12 +243,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           androidClientId: ids.androidClientId,
           webClientId: ids.webClientId,
           clientId: ids.clientId,
-          ...(platformRedirectUri ? { redirectUri: platformRedirectUri } : {}),
+          ...(webRedirectUri ? { redirectUri: webRedirectUri } : {}),
         }
       : {
           clientId: 'UNCONFIGURED.apps.googleusercontent.com',
           webClientId: 'UNCONFIGURED.apps.googleusercontent.com',
-          ...(platformRedirectUri ? { redirectUri: platformRedirectUri } : {}),
+          ...(webRedirectUri ? { redirectUri: webRedirectUri } : {}),
         }
   );
 
@@ -300,43 +288,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // #endregion
   }, [ids.androidClientId, request]);
 
-  useEffect(() => {
-    if (Platform.OS === 'web') return;
-    let cancelled = false;
-    const subscription = Linking.addEventListener('url', (event) => {
-      // #region agent log
-      agentLog(
-        'auth-context.tsx:Linking.url',
-        'Linking url event',
-        {
-          received: true,
-          url: redactOAuthUrl(event.url),
-          shape: redirectUriShape(redactOAuthUrl(event.url)),
-        },
-        'H1'
-      );
-      // #endregion
-    });
-    void Linking.getInitialURL().then((url) => {
-      if (cancelled) return;
-      // #region agent log
-      agentLog(
-        'auth-context.tsx:Linking.initial',
-        'Linking initial URL',
-        {
-          received: Boolean(url),
-          url: redactOAuthUrl(url),
-        },
-        'H1'
-      );
-      // #endregion
-    });
-    return () => {
-      cancelled = true;
-      subscription.remove();
-    };
-  }, []);
-
   const finishWithAuthResult = useCallback(
     async (result: AuthSessionResult) => {
       const snapshot = {
@@ -351,10 +302,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (result.type === 'error') {
           setError(result.error?.message ?? 'Google sign-in failed');
         } else if (result.type === 'dismiss' || result.type === 'cancel') {
+          if (Platform.OS !== 'web') {
+            // Android Custom Tabs often dismiss after Google opens the app via Linking.
+            return;
+          }
           setError(
-            Platform.OS === 'web'
-              ? 'Sign-in did not finish. Open http://localhost:8081 in Chrome or Safari (Cursor’s browser often blocks Google after Allow), and add this Redirect URI in Google Cloud Console (Web client).'
-              : 'Sign-in was cancelled.'
+            'Sign-in did not finish. Open http://localhost:8081 in Chrome or Safari (Cursor’s browser often blocks Google after Allow), and add this Redirect URI in Google Cloud Console (Web client).'
           );
         }
         return;
@@ -369,43 +322,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           result.params.id_token ||
           (result.authentication as { idToken?: string } | null)?.idToken ||
           '';
-
-        // Native flows often return an auth code first; exchange it for an ID token.
-        if (!idToken && result.params.code && request) {
-          const clientId = clientIdForPlatform(ids);
-          if (!clientId) {
-            // #region agent log
-            agentLog(
-              'auth-context.tsx:finishWithAuthResult',
-              'Missing platform client ID',
-              { platform: Platform.OS },
-              'H3'
-            );
-            // #endregion
-            setError('Missing Google client ID for this platform.');
-            return;
-          }
-          const exchanged = await exchangeCodeAsync(
-            {
-              clientId,
-              code: result.params.code,
-              redirectUri: request.redirectUri,
-              extraParams: {
-                code_verifier: request.codeVerifier ?? '',
-              },
-            },
-            Google.discovery
-          );
-          idToken = exchanged.idToken ?? '';
-          // #region agent log
-          agentLog(
-            'auth-context.tsx:finishWithAuthResult',
-            'Code exchange completed',
-            { hasIdToken: Boolean(idToken) },
-            'H3'
-          );
-          // #endregion
-        }
 
         if (!idToken) {
           // #region agent log
@@ -458,7 +374,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSigningIn(false);
       }
     },
-    [ids, request]
+    [request]
   );
 
   // Completes sign-in when Google redirects back (popup or full-page return).
@@ -475,12 +391,71 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
       return;
     }
-    if (!request) {
-      setError('Google sign-in is still preparing. Wait a second and try again.');
-      return;
-    }
     setError(null);
     setSigningIn(true);
+    if (Platform.OS !== 'web') {
+      try {
+        if (!ids.webClientId) {
+          throw new Error('Missing Google Web client ID for native token verification.');
+        }
+        // #region agent log
+        agentLog(
+          'auth-context.tsx:signIn',
+          'Native Google Sign-In starting',
+          {
+            platform: Platform.OS,
+            hasWebClientId: true,
+            hasPlatformClientId: Boolean(
+              Platform.OS === 'android' ? ids.androidClientId : ids.iosClientId
+            ),
+          },
+          'H12'
+        );
+        // #endregion
+        const { nativeGoogleIdToken } = await import('@/services/native-google-sign-in');
+        const idToken = await nativeGoogleIdToken(ids.webClientId, ids.iosClientId);
+        if (!idToken) {
+          setSigningIn(false);
+          return;
+        }
+        const next = await establishSession(idToken);
+        setSession(next);
+        setError(null);
+        // #region agent log
+        agentLog(
+          'auth-context.tsx:signIn',
+          'Native application session established',
+          { hasUserId: Boolean(next.user.id) },
+          'H12'
+        );
+        // #endregion
+      } catch (e) {
+        await clearAuthSession();
+        setSession(null);
+        const { nativeGoogleErrorMessage } = await import('@/services/native-google-sign-in');
+        setError(nativeGoogleErrorMessage(e));
+        // #region agent log
+        agentLog(
+          'auth-context.tsx:signIn',
+          'Native Google Sign-In failed',
+          {
+            isApiError: e instanceof ApiError,
+            status: e instanceof ApiError ? e.status : null,
+            name: e instanceof Error ? e.name : 'unknown',
+          },
+          'H12'
+        );
+        // #endregion
+      } finally {
+        setSigningIn(false);
+      }
+      return;
+    }
+    if (!request) {
+      setError('Google sign-in is still preparing. Wait a second and try again.');
+      setSigningIn(false);
+      return;
+    }
     try {
       // #region agent log
       agentLog(
@@ -516,12 +491,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setError(e instanceof Error ? e.message : 'Google sign-in failed');
       setSigningIn(false);
     }
-  }, [configured, promptAsync, request, finishWithAuthResult]);
+  }, [configured, ids, promptAsync, request, finishWithAuthResult]);
 
   const signOut = useCallback(async () => {
     const current = await loadAuthSession();
     if (current?.refreshToken) {
       await revokeApplicationSession(current.refreshToken);
+    }
+    if (Platform.OS !== 'web') {
+      const { nativeGoogleSignOut } = await import('@/services/native-google-sign-in');
+      await nativeGoogleSignOut().catch(() => {});
     }
     await clearAuthSession();
     clearWebAuthCallbackUrl();
@@ -538,7 +517,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       error,
       signIn,
       signOut,
-      configured: configured && (Platform.OS === 'web' ? !!ids.webClientId : true),
+      configured,
       redirectUri: webRedirectUri ?? '',
     }),
     [
@@ -549,7 +528,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signIn,
       signOut,
       configured,
-      ids.webClientId,
       webRedirectUri,
     ]
   );
